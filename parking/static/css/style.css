@@ -6,3 +6,7 @@
 .hide{display:none}
 /* 현재 안내 차량: 관리자 도면에서도 파란색으로 강조, 목록에서도 표시 */
 .target .fill{fill:rgba(77,163,255,.28)}.target .bay{stroke:#4da3ff;stroke-width:4}.item.on{background:#eef4ff}.btns{display:flex;gap:6px}
+/* 카메라 인식 알림 */
+.detect{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;padding:10px 12px;border-radius:8px;background:#eaf7ef;border:1px solid #31c96b;font-size:13px}.detect span{color:var(--sub)}.detect.warn{background:#fff4e5;border-color:#f5a623}
+/* 입구 카메라 */
+.cam{display:flex;gap:14px;align-items:center}.cam img{width:240px;max-width:45%;border-radius:6px;background:#000}.cam>div{flex:1;min-width:0}.cam b{text-align:right;word-break:break-all}

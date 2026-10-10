@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify
-import csv, os, random, re, threading
+import csv, os, random, re, threading, time
 
 app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +65,15 @@ if not spaces:
 state = {s['id']: {'status':'free', 'plate':None} for s in spaces}
 vehicle_assignments = {}
 current = {'plate': None}  # 지금 두 화면(관리자/내비)이 함께 보고 있는 차량 번호
+# 카메라(final.py)가 마지막으로 인식한 번호판. seq는 새 인식이 들어올 때마다 1씩 커짐
+detected = {'seq': 0, 'plate': None, 'time': None}
+# 카메라 상태 (final.py로 실행했을 때만 on이 됨). status: 인식 상태, text: 카메라가 지금 읽은 글자
+camera = {'on': False, 'status': '카메라 꺼짐 (final.py로 실행하면 켜집니다)', 'text': ''}
+
+def set_detected(plate):
+    # final.py가 번호판을 확정하면 호출 → 관리자 화면의 차량번호 칸에 채워짐 (배정은 관리자가 직접)
+    with lock:
+        detected.update(seq=detected['seq'] + 1, plate=normalize_plate(plate), time=time.strftime('%H:%M:%S'))
 
 def classify(vehicle):
     # 경차 → K / 비경차: 너비 >= 기준 → B, 너비 < 기준 → S
@@ -81,7 +90,7 @@ def classify(vehicle):
 def snapshot():
     return {'spaces': [{'id':s['id'], 'type':s['type'], **state[s['id']]} for s in spaces],
             'vehicles': [{**v, 'need': classify(v)} for v in vehicles], 'assignments': vehicle_assignments,
-            'width_limit': WIDTH_LIMIT, 'current': current['plate']}
+            'width_limit': WIDTH_LIMIT, 'current': current['plate'], 'detected': dict(detected), 'camera': dict(camera)}
 
 @app.get('/')
 def home(): return render_template('index.html')  # 관리자 / 내비게이션 대시보드 선택 화면
@@ -100,6 +109,7 @@ def assign():
         if plate in vehicle_assignments:
             sid = vehicle_assignments[plate]
             current['plate'] = plate
+            if detected['plate'] == plate: detected['plate'] = None
             return jsonify(ok=True, message=f"이미 {sid}번 공간에 배정되어 있습니다. {sid}번 공간으로 안내합니다.", space=sid)
         # 2) 등록된 차량인지 확인
         vehicle = next((v for v in vehicles if v['plate'] == plate), None)
@@ -116,6 +126,7 @@ def assign():
         state[space['id']] = {'status':'assigned', 'plate':plate}
         vehicle_assignments[plate] = space['id']
         current['plate'] = plate  # 배정한 차량을 두 화면의 현재 차량으로 설정
+        if detected['plate'] == plate: detected['plate'] = None  # 카메라 인식 알림 처리 완료
     return jsonify(ok=True, message=f"{space['id']}번 공간으로 안내합니다. (차량 유형 {needed})", space=space['id'])
 
 @app.post('/api/select')
@@ -127,6 +138,12 @@ def select():
     current['plate'] = plate
     sid = vehicle_assignments.get(plate)
     return jsonify(ok=True, message=f'{sid}번 공간으로 안내합니다.' if sid else '배정된 주차 공간이 없습니다.', space=sid)
+
+@app.post('/api/detected/clear')
+def clear_detected():
+    # 관리자가 카메라 인식 결과를 무시(오인식 등)할 때 사용
+    with lock: detected['plate'] = None
+    return jsonify(ok=True, message='카메라 인식 결과를 지웠습니다.')
 
 @app.post('/api/complete')
 def complete():

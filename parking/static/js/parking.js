@@ -3,7 +3,7 @@ const $=id=>document.getElementById(id);
 const ROWS=[{y:20,led:156,pil:125,items:['S','P','B','S','B','B']},{y:260,led:274,pil:272,items:['K','S','B','P','B']}], W={K:56,S:70,B:92,P:70}, H=150;
 // 입구 위치와 가운데 통로의 높이(y)
 const ENT={x:453,y:418}, AISLE=215;
-let data=null, lastCurrent=null, pos={};
+let data=null, lastCurrent=null, lastSeq=null, pos={};
 // 번호판의 공백, '-', '_'를 지우고 대문자로 통일 (서버 normalize_plate와 같은 규칙)
 const normPlate=v=>String(v).replace(/[\s_-]+/g,'').toUpperCase();
 // 화면에 글자를 넣을 때 HTML로 해석되지 않게 바꿔 줌
@@ -41,6 +41,7 @@ async function selectCar(p){const d=await post('/api/select',{plate:p});await re
 
 function renderAdmin(){
  const c=cur();makeLot('adm',c.sid);
+ renderDetected();renderCamera();
  const spaces=data.spaces,free=spaces.filter(s=>s.status==='free').length;$('free').textContent=`${free} / ${spaces.length}`;
  $('summary').innerHTML=`<span class="pill">빈자리 ${free}</span><span class="pill">배정 ${spaces.filter(s=>s.status==='assigned').length}</span><span class="pill">주차 완료 ${spaces.filter(s=>s.status==='occupied').length}</span><span class="pill">너비 기준 ${data.width_limit}mm</span>`;
  // 현재 안내 차량
@@ -52,6 +53,24 @@ function renderAdmin(){
  $('assignments').innerHTML=assigned.length?assigned.map(s=>`<div class="item${s.plate===c.p?' on':''}"><span>${esc(s.plate)} · ${esc(s.id)}번 · ${s.status==='occupied'?'주차 완료':'배정됨'}</span><span class="btns"><button class="sim alt" onclick="pick('${encodeURIComponent(s.plate)}')">안내</button><button onclick="exitCar('${encodeURIComponent(s.plate)}')">출차</button></span></div>`).join(''):'<div class="message">배정된 차량이 없습니다.</div>';
  $('vehicles').innerHTML=data.vehicles.map(v=>`<div class="item"><span>${esc(v.plate)} · ${esc(v.type)} · ${v.width}mm</span><span>${data.assignments[v.plate]?esc(data.assignments[v.plate])+'번':''}</span></div>`).join('')||'<div class="message">등록 차량이 없습니다.</div>';
 }
+// 카메라(final.py)가 인식한 번호판을 보여 주고, 차량번호 칸에 채워 둠 (배정은 관리자가 [배정]을 눌러야 함)
+function renderDetected(){
+ const d=data.detected||{};
+ if(!d.plate){$('detected').innerHTML='';lastSeq=d.seq;return;}
+ // 새 인식이 들어왔을 때만 입력칸을 채움 (관리자가 다른 번호를 입력하는 중이면 건드리지 않음)
+ if(d.seq!==lastSeq&&!(document.activeElement===$('plate')&&$('plate').value)){lastSeq=d.seq;$('plate').value=d.plate;}
+ const sid=data.assignments[d.plate],reg=data.vehicles.some(v=>v.plate===d.plate);
+ const note=sid?`이미 ${esc(sid)}번에 배정된 차량입니다. [배정]을 누르면 다시 안내합니다.`:reg?'등록 차량입니다. 번호를 확인한 뒤 [배정]을 누르세요.':'등록되지 않은 차량입니다. 번호가 맞는지 확인하세요.';
+ $('detected').innerHTML=`<div class="detect${reg?'':' warn'}"><div><b>카메라 인식: ${esc(d.plate)}</b> <small>${esc(d.time)}</small><br><span>${note}</span></div><button class="sim alt" type="button" onclick="clearDetected()">무시</button></div>`;
+}
+// 입구 카메라 영상과 인식 상태 (final.py로 실행했을 때만 영상이 나옴)
+function renderCamera(){
+ const cam=data.camera||{},img=$('camImg');
+ $('camStatus').textContent=cam.status||'-';$('camText').textContent=cam.on?(cam.text||'-'):'-';
+ if(cam.on&&img.hidden){img.src='/camera.mjpg?'+Date.now();img.hidden=false;}  // 카메라가 켜지면 영상 연결
+ if(!cam.on&&!img.hidden){img.hidden=true;img.removeAttribute('src');}
+}
+async function clearDetected(){try{await post('/api/detected/clear',{});$('plate').value='';await refresh();}catch(e){$('msg').textContent=e.message;}}
 async function pick(p){try{const d=await selectCar(decodeURIComponent(p));$('msg').textContent=d.message;}catch(e){$('msg').textContent=e.message;}}
 async function exitCar(p){try{await post('/api/exit',{plate:decodeURIComponent(p)});$('msg').textContent='출차 처리되었습니다.';await refresh();}catch(e){$('msg').textContent=e.message;}}
 
