@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>주차 안내 시스템</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#eceff1;--card:#fff;--ink:#222;--sub:#6b7280;--line:#c9ced4;--road:#4a4f55;--blue:#1e50ff}
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15181b;--card:#20252a;--ink:#e8e8e8;--sub:#9aa3ad;--line:#3a424a}}
+:root[data-theme="dark"]{--bg:#15181b;--card:#20252a;--ink:#e8e8e8;--sub:#9aa3ad;--line:#3a424a}
+*{box-sizing:border-box}
+body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:"Noto Sans KR","Malgun Gothic",sans-serif}
+.frame{height:100%;padding:12px;display:grid;grid-template-columns:1fr 1fr}
+.pane{min-height:0;display:flex;flex-direction:column;gap:10px;padding:4px 16px}
+.pane+.pane{border-left:2px solid var(--line)}
+h1{font-size:clamp(16px,2.4vh,22px);margin:0;text-align:center}
+.box{flex:1;min-height:0;display:flex;flex-direction:column;border:2px solid var(--line);border-radius:8px;background:var(--card)}
+.sec{padding:10px 14px;border-top:1px solid var(--line);font-size:clamp(12px,1.9vh,15px)}
+.sec:first-child{border-top:0}
+.sec h2{font-size:clamp(13px,2vh,16px);margin:0 0 6px}
+.s1{flex:1;min-height:0;display:flex;flex-direction:column}
+.s1 .in{flex:1;min-height:0;display:flex;gap:14px}
+.s1 svg{height:100%;width:auto;max-width:64%;flex:none;border-radius:6px}
+.side{display:flex;flex-direction:column;gap:6px;justify-content:center;flex:1}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:2px 0}
+.row span{color:var(--sub)}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+.dot.r{background:#ff3b30;box-shadow:0 0 6px #ff3b30}
+.dot.o{background:#2c3034;border:1px solid #888}
+.hide{display:none}
+/* 주차장 도면 */
+.wall{fill:none;stroke:#f5f5f5;stroke-width:3}
+.bay{fill:none;stroke:#f5f5f5;stroke-width:2}
+.ty{font-size:26px;font-weight:700;fill:#f5f5f5;text-anchor:middle;dominant-baseline:central}
+.no{font-size:12px;fill:#c3c9cf;text-anchor:middle}
+.pil{fill:#d9dde1;stroke:#2b2f33;stroke-width:2}
+.ledc{fill:#2c3034;stroke:#8a9097;stroke-width:1.5}
+.occ .ledc{fill:#ff3b30;stroke:#ff8a80;filter:drop-shadow(0 0 4px #ff3b30)}
+.b{cursor:pointer}
+.b .fill{fill:transparent}
+.guide .tg .fill{fill:rgba(77,163,255,.28)}
+.guide .tg .bay{stroke:#4da3ff;stroke-width:4}
+.route{display:none;fill:none;stroke:#4da3ff;stroke-width:8;stroke-linecap:round;stroke-linejoin:round}
+.head{display:none;fill:#4da3ff}
+.guide .route,.guide .head{display:block}
+.ent{font-size:14px;fill:#c3c9cf;text-anchor:middle}
+button{font:inherit;cursor:pointer;border:0;border-radius:8px;background:var(--blue);color:#fff;font-weight:700}
+button:focus-visible{outline:3px solid #8aa8ff;outline-offset:2px}
+.sim{padding:6px 12px;font-size:.95em}
+.sim.alt{background:var(--line);color:var(--ink)}
+/* 차량 내비 */
+.car{flex:1;min-height:0;display:flex;flex-direction:column;gap:10px;background:#1b2128;color:#fff;border-radius:12px;padding:14px}
+.car h2{margin:0;font-size:clamp(13px,2vh,16px);color:#aeb8c2}
+.turn{display:flex;align-items:center;gap:14px;background:#26303a;border-radius:10px;padding:10px 14px}
+.turn svg{width:clamp(36px,6vh,56px);height:clamp(36px,6vh,56px);flex:none}
+.turn strong{font-size:clamp(18px,3.4vh,28px);display:block}
+.turn span{color:#aeb8c2;font-size:clamp(12px,1.9vh,15px)}
+.nav{flex:1;min-height:0;background:#26303a;border-radius:10px;position:relative;display:flex;justify-content:center}
+.nav svg{height:100%;width:auto;max-width:100%}
+.idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aeb8c2;font-size:clamp(14px,2.2vh,18px);background:rgba(38,48,58,.85);border-radius:10px}
+#done{padding:clamp(10px,2vh,18px);font-size:clamp(16px,3vh,24px)}
+#done:disabled{background:#3a4650;color:#8b97a3;cursor:not-allowed}
+</style>
+</head>
+<body>
+<div class="frame">
+
+<section class="pane" aria-label="관리자 화면">
+  <h1>관리자 화면</h1>
+  <div class="box">
+    <div class="sec s1">
+      <h2>1. 주차도면</h2>
+      <div class="in">
+        <svg class="lot" id="adm" viewBox="0 0 526 450" role="img" aria-label="주차장 도면. 칸을 누르면 주차 상태가 바뀝니다"></svg>
+        <div class="side">
+          <div class="row"><span>빈자리</span><b id="free">-</b></div>
+          <div class="row"><span><i class="dot r"></i>빨간불</span><b>주차중</b></div>
+          <div class="row"><span><i class="dot o"></i>꺼짐</span><b>빈자리</b></div>
+          <div class="row"><span>경 / S / B</span><b>경차 / 소형 / 대형</b></div>
+          <div class="row"><span style="font-size:.85em">칸을 누르면 상태가 바뀝니다(시연)</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="sec">
+      <h2>2. 주차예약</h2>
+      <div class="row"><span>예약자</span><b>110동 1203호</b></div>
+      <div class="row"><span>배정 구역</span><b>9번 (대형)</b></div>
+    </div>
+    <div class="sec">
+      <h2>3. 차량 진입</h2>
+      <div id="idle3" class="row"><span>진입한 차량이 없습니다</span><button id="enter" class="sim" type="button">차량 진입(시연)</button></div>
+      <div id="info3" class="hide">
+        <div class="row"><span>차량번호</span><b>12가 3456</b></div>
+        <div class="row"><span>상태</span><b id="st">차량 안내 시작</b><button id="reset" class="sim alt" type="button">초기화</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="pane" aria-label="차량 내부 내비 화면">
+  <h1>차량 내부 내비 화면</h1>
+  <div class="car">
+    <h2>길안내</h2>
+    <div class="turn">
+      <svg viewBox="0 0 56 56" aria-hidden="true"><path d="M28 6 L46 26 L34 26 L34 50 L22 50 L22 26 L10 26 Z" fill="#fff"/></svg>
+      <div><strong id="dist">대기 중</strong><span id="dest">차량이 진입하면 안내가 시작됩니다</span></div>
+    </div>
+    <div class="nav">
+      <svg class="lot" id="nav" viewBox="0 0 526 450" aria-hidden="true"></svg>
+      <div id="idle" class="idle">대기 중</div>
+    </div>
+    <button id="done" type="button" disabled>주차완료</button>
+  </div>
+</section>
+
+</div>
+<script>
+const $=id=>document.getElementById(id);
+// 칸 종류와 폭: 경(경차) 56, S(소형) 70, B(대형) 92, P(기둥칸) 70
+const ROWS=[
+ {y:20,led:156,pil:125,items:["S","P","B","S","B","B"]},
+ {y:260,led:274,pil:272,items:["경","S","B","P","B"]}
+];
+const W={"경":56,S:70,B:92,P:70},H=150,INIT=[1,2,4,6,8],TARGET=9;
+function lot(){
+  let s='<rect width="526" height="450" fill="#4a4f55"/>';
+  let n=0;
+  ROWS.forEach(r=>{let x=20;r.items.forEach(t=>{
+    const w=W[t],cx=x+w/2;
+    if(t==="P"){
+      s+=`<rect class="bay" x="${x}" y="${r.y}" width="${w}" height="${H}"/><rect class="pil" x="${cx-14}" y="${r.pil}" width="28" height="28"/>`;
+    }else{
+      n++;
+      s+=`<g class="b" data-id="${n}"><rect class="fill bay" x="${x}" y="${r.y}" width="${w}" height="${H}"/>`+
+         `<text class="ty" x="${cx}" y="${r.y+H/2}">${t}</text><text class="no" x="${cx}" y="${r.y===20?r.y+22:r.y+H-10}">${n}</text>`+
+         `<circle class="ledc" cx="${cx}" cy="${r.led}" r="6"/></g>`;
+    }
+    x+=w;});});
+  s+='<path class="wall" d="M506 410 V20 H20 V410 H400 V260 H20 M20 170 H506"/>';
+  s+='<path class="route" d="M453 418 V215 H354 V282"/><polygon class="head" points="340,280 368,280 354,305"/>';
+  s+='<text class="ent" x="453" y="441">입구</text>';
+  return s;
+}
+["adm","nav"].forEach(i=>{$(i).innerHTML=lot();});
+document.querySelectorAll("#nav .b").forEach(g=>g.style.pointerEvents="none");
+document.querySelector("#nav").querySelectorAll(".b").forEach(()=>{});
+// 안내 대상 칸 표시
+document.querySelectorAll(`.b[data-id="${TARGET}"]`).forEach(g=>g.classList.add("tg"));
+
+let occ=new Set(INIT),state="idle";
+function render(){
+  document.querySelectorAll(".b").forEach(g=>g.classList.toggle("occ",occ.has(+g.dataset.id)));
+  ["adm","nav"].forEach(i=>$(i).classList.toggle("guide",state==="guide"));
+  $("free").textContent=(9-occ.size)+" / 9";
+  $("idle3").classList.toggle("hide",state!=="idle");
+  $("info3").classList.toggle("hide",state==="idle");
+  $("st").textContent=state==="done"?"주차 완료 (9번)":"차량 안내 시작";
+  $("idle").classList.toggle("hide",state!=="idle");
+  $("done").disabled=state!=="guide";
+  $("dist").textContent=state==="idle"?"대기 중":state==="guide"?"직진 80m":"주차 완료";
+  $("dest").textContent=state==="idle"?"차량이 진입하면 안내가 시작됩니다":state==="guide"?"9번 대형 주차구역으로 안내 중":"안내를 종료했습니다";
+}
+$("adm").addEventListener("click",e=>{
+  const g=e.target.closest(".b");if(!g)return;
+  const id=+g.dataset.id;if(state==="guide"&&id===TARGET)return;
+  occ.has(id)?occ.delete(id):occ.add(id);render();
+});
+$("enter").onclick=()=>{occ.delete(TARGET);state="guide";render();};
+$("done").onclick=()=>{occ.add(TARGET);state="done";render();};
+$("reset").onclick=()=>{occ=new Set(INIT);state="idle";render();};
+render();
+</script>
+</body>
+</html>
