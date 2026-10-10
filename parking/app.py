@@ -1,9 +1,14 @@
 from flask import Flask, render_template, request, jsonify
-import csv, os
+import csv, os, random, re, threading
 
 app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
-WIDTH_LIMIT = 1900
+WIDTH_LIMIT = 1900  # 비경차 너비 기준 n(mm). 실제 주차장에 맞춰 바꿀 수 있는 설정값
+lock = threading.Lock()  # 여러 차량이 동시에 배정 요청을 해도 같은 칸이 두 번 배정되지 않게 막음
+
+def normalize_plate(value):
+    # 번호판의 공백, '-', '_'를 지우고 대문자로 통일 (예: '18나 7315' → '18나7315')
+    return re.sub(r'[\s_-]+', '', str(value)).upper()
 
 def read_csv(name, kind):
     path = os.path.join(BASE, name)
@@ -15,7 +20,7 @@ def read_csv(name, kind):
     if not rows:
         return []
     first = [x.replace(' ', '').lower() for x in rows[0]]
-    header = any(x in first for x in ['차량번호', '차량 번호', '차량종류', '주차공간번호', '주차공간종류', 'vehicle_number', 'space_number'])
+    header = any(x in first for x in ['차량번호', '차량 번호', '차량종류', '주차공간번호', '주차공간종류', '공간번호', '공간종류', 'vehicle_number', 'space_number'])
     if header:
         keys = first
         data = rows[1:]
@@ -34,7 +39,7 @@ def read_csv(name, kind):
                 plate, typ, width = r[:3]
             try: width = int(float(width.replace('mm','').strip()))
             except ValueError: width = 0
-            result.append({'plate': plate, 'type': typ, 'width': width})
+            result.append({'plate': normalize_plate(plate), 'type': typ, 'width': width})
         elif kind == 'space' and len(r) >= 2:
             if keys:
                 d = dict(zip(keys, r))
@@ -59,19 +64,27 @@ if not spaces:
 # status: free / assigned / occupied
 state = {s['id']: {'status':'free', 'plate':None} for s in spaces}
 vehicle_assignments = {}
+current = {'plate': None}  # 지금 두 화면(관리자/내비)이 함께 보고 있는 차량 번호
 
 def classify(vehicle):
+    # 경차 → K / 비경차: 너비 >= 기준 → B, 너비 < 기준 → S
+    # 차량 정보가 비었거나 잘못되면 임의로 분류하지 않고 None을 돌려줌
     t = str(vehicle['type']).strip().lower()
-    if '경차' in t or t in ('경','k','compact'):
+    if not t:
+        return None
+    if '경차' in t or t in ('경','k','compact','compact car'):
         return 'K'
+    if vehicle['width'] <= 0:
+        return None
     return 'B' if vehicle['width'] >= WIDTH_LIMIT else 'S'
 
 def snapshot():
     return {'spaces': [{'id':s['id'], 'type':s['type'], **state[s['id']]} for s in spaces],
-            'vehicles': vehicles, 'assignments': vehicle_assignments, 'width_limit': WIDTH_LIMIT}
+            'vehicles': [{**v, 'need': classify(v)} for v in vehicles], 'assignments': vehicle_assignments,
+            'width_limit': WIDTH_LIMIT, 'current': current['plate']}
 
 @app.get('/')
-def home(): return render_template('admin.html')
+def home(): return render_template('index.html')  # 관리자 / 내비게이션 대시보드 선택 화면
 @app.get('/admin')
 def admin(): return render_template('admin.html')
 @app.get('/guide')
@@ -81,20 +94,43 @@ def api_state(): return jsonify(snapshot())
 
 @app.post('/api/assign')
 def assign():
-    plate = request.json.get('plate','').strip()
-    vehicle = next((v for v in vehicles if v['plate'] == plate), None)
-    if not vehicle: return jsonify(ok=False, message='차량 정보가 없습니다.'), 404
-    if plate in vehicle_assignments: return jsonify(ok=False, message=f"이미 {vehicle_assignments[plate]}번 공간에 배정되어 있습니다."), 400
-    needed = classify(vehicle)
-    space = next((s for s in spaces if s['type'] == needed and state[s['id']]['status'] == 'free'), None)
-    if not space: return jsonify(ok=False, message=f'{needed} 유형의 빈 주차 공간이 없습니다.'), 400
-    state[space['id']] = {'status':'assigned', 'plate':plate}
-    vehicle_assignments[plate] = space['id']
-    return jsonify(ok=True, message=f"{space['id']}번 공간으로 안내합니다.", space=space['id'])
+    plate = normalize_plate(request.json.get('plate',''))
+    with lock:
+        # 1) 이미 배정된 차량이면 새로 배정하지 않고 기존 공간을 다시 안내
+        if plate in vehicle_assignments:
+            sid = vehicle_assignments[plate]
+            current['plate'] = plate
+            return jsonify(ok=True, message=f"이미 {sid}번 공간에 배정되어 있습니다. {sid}번 공간으로 안내합니다.", space=sid)
+        # 2) 등록된 차량인지 확인
+        vehicle = next((v for v in vehicles if v['plate'] == plate), None)
+        if not vehicle: return jsonify(ok=False, message='등록되지 않은 차량입니다.'), 404
+        # 3) 차량 유형(K/B/S) 결정
+        needed = classify(vehicle)
+        if not needed: return jsonify(ok=False, message='차량 정보(종류/너비)가 올바르지 않아 배정할 수 없습니다.'), 400
+        # 4) 유형이 같고, 비어 있고, 다른 차량에 배정되지 않은 공간만 후보로 선택
+        taken = set(vehicle_assignments.values())
+        candidates = [s for s in spaces if s['type'] == needed and state[s['id']]['status'] == 'free' and s['id'] not in taken]
+        if not candidates: return jsonify(ok=False, message=f'{needed} 유형의 빈 주차 공간이 없습니다.'), 400
+        # 5) 후보 중 하나를 무작위로 배정 (아직 '주차 완료'가 아니므로 occupied가 아닌 assigned 상태)
+        space = random.choice(candidates)
+        state[space['id']] = {'status':'assigned', 'plate':plate}
+        vehicle_assignments[plate] = space['id']
+        current['plate'] = plate  # 배정한 차량을 두 화면의 현재 차량으로 설정
+    return jsonify(ok=True, message=f"{space['id']}번 공간으로 안내합니다. (차량 유형 {needed})", space=space['id'])
+
+@app.post('/api/select')
+def select():
+    # 어느 화면에서든 차량 번호를 입력하면 두 화면이 모두 그 차량을 보도록 현재 차량을 바꿈
+    plate = normalize_plate(request.json.get('plate',''))
+    if plate not in vehicle_assignments and not any(v['plate'] == plate for v in vehicles):
+        return jsonify(ok=False, message='등록되지 않은 차량입니다.'), 404
+    current['plate'] = plate
+    sid = vehicle_assignments.get(plate)
+    return jsonify(ok=True, message=f'{sid}번 공간으로 안내합니다.' if sid else '배정된 주차 공간이 없습니다.', space=sid)
 
 @app.post('/api/complete')
 def complete():
-    plate = request.json.get('plate','').strip()
+    plate = normalize_plate(request.json.get('plate',''))
     sid = vehicle_assignments.get(plate)
     if sid is None: return jsonify(ok=False, message='배정된 주차 공간이 없습니다.'), 404
     state[sid]['status'] = 'occupied'
@@ -102,10 +138,12 @@ def complete():
 
 @app.post('/api/exit')
 def exit_vehicle():
-    plate = request.json.get('plate','').strip()
-    sid = vehicle_assignments.pop(plate, None)
-    if sid is None: return jsonify(ok=False, message='배정된 공간이 없습니다.'), 404
-    state[sid] = {'status':'free', 'plate':None}
+    plate = normalize_plate(request.json.get('plate',''))
+    with lock:
+        sid = vehicle_assignments.pop(plate, None)
+        if sid is None: return jsonify(ok=False, message='배정된 공간이 없습니다.'), 404
+        state[sid] = {'status':'free', 'plate':None}
+        if current['plate'] == plate: current['plate'] = None  # 출차한 차량이면 화면 안내도 종료
     return jsonify(ok=True, message='출차 처리되었습니다.')
 
 if __name__ == '__main__':
