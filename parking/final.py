@@ -8,12 +8,13 @@
 import os
 # Ctrl+C로 끌 때 'forrtl: error (200)'로 강제 종료되는 것을 막음 (numpy/scipy가 쓰는 Intel 라이브러리 문제)
 os.environ.setdefault('FOR_DISABLE_CONSOLE_CTRL_HANDLER', '1')
-import logging, re, sys, threading, time, webbrowser
+import logging, re, sys, threading, time, urllib.error, urllib.request, webbrowser
 import cv2, easyocr, serial
 import numpy as np
 from flask import Response
 from PIL import Image, ImageDraw, ImageFont
 import app as server  # app.py의 Flask 서버와 주차 상태를 그대로 사용
+import water_model    # 수위 예측 모델(선형회귀)
 
 # 카메라 번호. 'python final.py 2'처럼 실행하면 2번 카메라를 씀 (없으면 아래 기본값)
 # 이 노트북: 0 = 내장 카메라, 1 = 외장 USB 카메라, 2 = 가상 카메라(영상 없음, 빨간 X 화면). USB를 다시 꽂으면 번호가 바뀔 수 있음
@@ -26,6 +27,14 @@ URL = 'http://127.0.0.1:5000'
 WINDOW = 'Parking Camera (q: quit)'
 ARDUINO_PORT = 'COM6'  # 아두이노 우노가 연결된 포트
 ARDUINO_BAUD = 9600    # 아두이노 코드의 Serial.begin() 값과 같아야 함
+# 수위 센서 (아두이노가 1초마다 A0 값 0~1023을 한 줄씩 보냄)
+FLOOD_LIMIT = 500      # 이 값 이상이면 침수. 실제 센서를 물에 담가 보고 맞출 것
+PREDICT_MIN = 15       # 몇 분 뒤를 예측할지
+TREND_SEC = 120        # 최근 몇 초 동안의 값으로 변화 추세를 계산할지 (2분)
+# 침수 위험 알림을 보낼 ESP32 주소 (같은 와이파이에 연결돼 있어야 함). 실제 ESP32 IP와 주소로 바꿀 것
+ESP32_RISK_URL = 'http://192.168.0.100/flood'   # 침수 위험이 시작될 때 접속할 주소
+ESP32_CLEAR_URL = 'http://192.168.0.100/normal'  # 다시 정상이 될 때 접속할 주소 (필요 없으면 None)
+WATER_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'water_log.csv')  # 예측 모델 학습용 기록
 PLATE_RE = re.compile(r'\d{2,3}[가-힣]\d{4}')  # 번호판 모양: 12가3456 또는 123가4567
 
 # 카메라 화면에 한글을 쓰기 위한 글꼴 (cv2.putText는 한글이 ???로 나옴)
@@ -36,6 +45,11 @@ except OSError: FONT = None
 shared = {'frame': None, 'jpg': None, 'boxes': [], 'running': True}
 arduino = {'conn': None}
 arduino_lock = threading.Lock()
+water_history = []  # 최근 수위 값 (시각, 값) 목록
+WATER_MODEL = water_model.load()  # train_water_model.py로 학습한 모델. 없으면 None → 추세 예측 사용
+if WATER_MODEL:
+    PREDICT_MIN = WATER_MODEL['minutes']  # 모델이 학습한 예측 시간에 맞춤
+    print(f"[수위] 예측 모델 사용: {PREDICT_MIN:g}분 뒤 예측 (학습 {WATER_MODEL['trained']}, 평균 오차 {WATER_MODEL['mae']})")
 
 def open_arduino():
     arduino['conn'] = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=1)
@@ -67,6 +81,70 @@ def send_arduino(space_id, occupied):
                 if arduino['conn']: arduino['conn'].close()
                 arduino['conn'] = None  # 다음 전송 때 다시 연결 시도
     threading.Thread(target=run, daemon=True).start()
+
+def predict_water(history):
+    # PREDICT_MIN분 뒤 수위를 예측. 돌려주는 값: (예측값, 사용한 방법)
+    # 1) 학습한 선형회귀 모델이 있고 최근 5분 값이 모였으면 모델로 예측
+    feats = water_model.latest_features(history) if WATER_MODEL else None
+    if feats: return water_model.predict(WATER_MODEL, feats), '선형회귀'
+    # 2) 아니면 간단한 추세 예측: 최근 TREND_SEC초 값에 직선을 맞춰 계산
+    recent = [h for h in history if history[-1][0] - h[0] <= TREND_SEC]
+    if len(recent) < 30: return None, None  # 30초 이상 모이기 전에는 예측하지 않음
+    t = np.array([h[0] for h in recent]); v = np.array([h[1] for h in recent])
+    slope = np.polyfit(t - t[0], v, 1)[0]  # 1초에 값이 얼마나 변하는지
+    return int(round(v[-1] + max(slope, 0) * PREDICT_MIN * 60)), '추세'  # 줄어드는 추세는 위험이 아니므로 0으로 봄
+
+def notify_esp32(url, label):
+    # ESP32 주소로 접속해서 그쪽 프로그램을 동작시킴. 실패해도 프로그램은 멈추지 않고 결과만 표시
+    if not url: return
+    def run():
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                result = f'{label} 보냄 ({r.status})'
+        except (urllib.error.URLError, OSError) as e:
+            result = f'{label} 전송 실패: {getattr(e, "reason", e)}'
+        server.water['esp32'] = f"{time.strftime('%H:%M:%S')} {result}"
+        print(f'[ESP32] {url} → {result}')
+    threading.Thread(target=run, daemon=True).start()
+
+def update_water(value):
+    # 아두이노에서 받은 수위 값으로 침수/침수 위험을 판단해 관리자 화면에 보여 줌
+    now = time.time()
+    water_history.append((now, value))
+    keep = max(TREND_SEC, water_model.FEATURE_SEC) + 5  # 모델에 최근 5분 값이 필요함
+    while water_history and now - water_history[0][0] > keep: water_history.pop(0)
+    predict, method = predict_water(water_history)
+    if value >= FLOOD_LIMIT: level = 'flood'
+    elif predict is not None and predict >= FLOOD_LIMIT: level = 'risk'
+    else: level = 'normal'
+    if level != server.water['level'] and level != 'normal':
+        print(f"[수위] {'침수' if level == 'flood' else f'{PREDICT_MIN}분 뒤 침수 위험'}: 현재 {value}, 예측 {predict}")
+    # 위험(예측 또는 이미 침수)이 시작될 때 / 정상으로 돌아올 때 한 번씩만 ESP32에 알림
+    was_alert, is_alert = server.water['level'] in ('risk', 'flood'), level in ('risk', 'flood')
+    if is_alert and not was_alert: notify_esp32(ESP32_RISK_URL, '침수 위험 신호')
+    if was_alert and not is_alert: notify_esp32(ESP32_CLEAR_URL, '해제 신호')
+    server.water.update(on=True, value=value, predict=predict, level=level, time=time.strftime('%H:%M:%S'), limit=FLOOD_LIMIT, minutes=PREDICT_MIN, method=method)
+    with open(WATER_LOG, 'a', encoding='utf-8') as f:  # 시각, 값을 계속 기록 → 나중에 예측 모델 학습에 사용
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{value}\n")
+
+def read_arduino():
+    # 아두이노가 보내는 수위 센서 값을 계속 읽음. 연결이 끊기면 5초마다 다시 연결 시도
+    while shared['running']:
+        conn = arduino['conn']
+        if conn is None:
+            time.sleep(5)
+            if arduino['conn'] is None: connect_arduino()
+            continue
+        try:
+            line = conn.readline().decode(errors='ignore').strip()
+        except (serial.SerialException, OSError, TypeError, AttributeError):
+            with arduino_lock:
+                if arduino['conn'] is conn:
+                    conn.close(); arduino['conn'] = None
+            server.water.update(on=False, level='off')
+            print('[아두이노] 연결이 끊겼습니다. 다시 연결을 시도합니다.')
+            continue
+        if line.isdigit(): update_water(int(line))  # 숫자가 아닌 줄은 무시
 
 def notify_arduino(view):
     # app.py의 [주차 완료]/[출차] 처리를 감싸서, 처리 뒤 점유 상태가 바뀐 공간만 아두이노에 알림
@@ -129,7 +207,7 @@ def run_server():
     server.app.add_url_rule('/camera.mjpg', 'camera_stream', camera_stream)
     for name in ('complete', 'exit_vehicle'):  # 주차 완료 / 출차 때 아두이노로 점유 상태 전송
         server.app.view_functions[name] = notify_arduino(server.app.view_functions[name])
-    threading.Thread(target=connect_arduino, daemon=True).start()
+    threading.Thread(target=lambda: (connect_arduino(), read_arduino()), daemon=True).start()  # 연결 후 수위 값 읽기
     server.app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False, threaded=True)
 
 def ocr_loop():

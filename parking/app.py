@@ -74,6 +74,8 @@ current = {'plate': None}  # 지금 두 화면(관리자/내비)이 함께 보�
 detected = {'seq': 0, 'plate': None, 'time': None}
 # 카메라 상태 (final.py로 실행했을 때만 on이 됨). status: 인식 상태, text: 카메라가 지금 읽은 글자
 camera = {'on': False, 'status': '카메라 꺼짐 (final.py로 실행하면 켜집니다)', 'text': ''}
+# 수위 센서 상태 (final.py가 아두이노에서 읽어 채움). level: off / normal / risk(침수 위험 예측) / flood(침수)
+water = {'on': False, 'value': None, 'predict': None, 'level': 'off', 'time': None, 'limit': None, 'minutes': None, 'esp32': None, 'method': None}
 
 def set_detected(plate):
     # final.py가 번호판을 확정하면 호출 → 관리자 화면의 차량번호 칸에 채워짐 (배정은 관리자가 직접)
@@ -95,7 +97,7 @@ def classify(vehicle):
 def snapshot():
     return {'spaces': [{'id':s['id'], 'type':s['type'], **state[s['id']]} for s in spaces],
             'vehicles': [{**v, 'need': classify(v)} for v in vehicles], 'assignments': vehicle_assignments,
-            'width_limit': WIDTH_LIMIT, 'current': current['plate'], 'detected': dict(detected), 'camera': dict(camera)}
+            'width_limit': WIDTH_LIMIT, 'current': current['plate'], 'detected': dict(detected), 'camera': dict(camera), 'water': dict(water)}
 
 @app.get('/')
 def home(): return render_template('index.html')  # 관리자 / 내비게이션 대시보드 선택 화면

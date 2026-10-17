@@ -41,7 +41,7 @@ async function selectCar(p){const d=await post('/api/select',{plate:p});await re
 
 function renderAdmin(){
  const c=cur();makeLot('adm',c.sid);
- renderDetected();renderCamera();
+ renderDetected();renderCamera();renderWater();
  const spaces=data.spaces,free=spaces.filter(s=>s.status==='free').length;$('free').textContent=`${free} / ${spaces.length}`;
  $('summary').innerHTML=`<span class="pill">빈자리 ${free}</span><span class="pill">배정 ${spaces.filter(s=>s.status==='assigned').length}</span><span class="pill">주차 완료 ${spaces.filter(s=>s.status==='occupied').length}</span><span class="pill">너비 기준 ${data.width_limit}mm</span>`;
  // 현재 안내 차량
@@ -69,6 +69,18 @@ function renderCamera(){
  $('camStatus').textContent=cam.status||'-';$('camText').textContent=cam.on?(cam.text||'-'):'-';
  if(cam.on&&img.hidden){img.src='/camera.mjpg?'+Date.now();img.hidden=false;}  // 카메라가 켜지면 영상 연결
  if(!cam.on&&!img.hidden){img.hidden=true;img.removeAttribute('src');}
+}
+// 수위 센서 값과 침수 알림 (final.py가 아두이노에서 읽은 값). 0~1023
+function renderWater(){
+ const w=data.water||{},box=$('water');if(!box)return;
+ box.className='water '+(w.level||'off');
+ $('waterValue').textContent=w.on?`${w.value} / 1023`:'-';
+ $('waterBar').style.width=w.on?`${w.value/1023*100}%`:'0';
+ $('waterLimit').style.left=w.limit?`${w.limit/1023*100}%`:'-10px';
+ $('waterPredictLabel').textContent=`${w.minutes||15}분 뒤 예측${w.method?` (${w.method})`:''}`;
+ $('waterPredict').textContent=w.on?(w.predict==null?'데이터 모으는 중':w.predict):'-';
+ $('waterEsp').textContent=w.esp32||'보낸 적 없음';
+ $('waterAlert').textContent={off:'센서 꺼짐 (final.py로 실행하면 켜집니다)',normal:`정상 (침수 기준 ${w.limit})`,risk:`⚠ ${w.minutes}분 내 침수 위험`,flood:'🚨 침수 발생'}[w.level||'off'];
 }
 async function clearDetected(){try{await post('/api/detected/clear',{});$('plate').value='';await refresh();}catch(e){$('msg').textContent=e.message;}}
 async function pick(p){try{const d=await selectCar(decodeURIComponent(p));$('msg').textContent=d.message;}catch(e){$('msg').textContent=e.message;}}
