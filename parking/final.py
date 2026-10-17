@@ -10,6 +10,7 @@ import os
 os.environ.setdefault('FOR_DISABLE_CONSOLE_CTRL_HANDLER', '1')
 import logging, re, sys, threading, time, urllib.error, urllib.request, webbrowser
 import cv2, easyocr, serial
+from serial.tools import list_ports
 import numpy as np
 from flask import Response
 from PIL import Image, ImageDraw, ImageFont
@@ -25,9 +26,11 @@ COOLDOWN = 10        # 같은 차량을 다시 관리자 화면에 알리기까�
 OPEN_BROWSER = True  # 실행하면 관리자/내비 화면을 브라우저에 자동으로 열지
 URL = 'http://127.0.0.1:5000'
 WINDOW = 'Parking Camera (q: quit)'
-ARDUINO_PORT = 'COM6'  # 아두이노 우노가 연결된 포트
+ARDUINO_PORT = 'COM6'  # 주차 LED 아두이노가 연결된 포트
 ARDUINO_BAUD = 9600    # 아두이노 코드의 Serial.begin() 값과 같아야 함
-# 수위 센서 (아두이노가 1초마다 A0 값 0~1023을 한 줄씩 보냄)
+# 수위 센서 (LED와 다른 아두이노 보드. 1초마다 A0 값 0~1023을 한 줄씩 보냄)
+WATER_PORT = 'COM7'    # 수위 센서 아두이노 포트 (센서 신호선은 A2). None이면 LED 포트가 아닌 USB 포트를 자동으로 찾음
+WATER_BAUD = 9600
 FLOOD_LIMIT = 500      # 이 값 이상이면 침수. 실제 센서를 물에 담가 보고 맞출 것
 PREDICT_MIN = 15       # 몇 분 뒤를 예측할지
 TREND_SEC = 120        # 최근 몇 초 동안의 값으로 변화 추세를 계산할지 (2분)
@@ -127,22 +130,33 @@ def update_water(value):
     with open(WATER_LOG, 'a', encoding='utf-8') as f:  # 시각, 값을 계속 기록 → 나중에 예측 모델 학습에 사용
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{value}\n")
 
-def read_arduino():
-    # 아두이노가 보내는 수위 센서 값을 계속 읽음. 연결이 끊기면 5초마다 다시 연결 시도
+def find_water_port():
+    # WATER_PORT가 None이면 LED 포트가 아닌 첫 번째 USB 시리얼 포트를 수위 센서 보드로 봄 (블루투스 포트 제외)
+    if WATER_PORT: return WATER_PORT
+    ports = [p.device for p in list_ports.comports() if 'USB' in p.hwid.upper() and p.device != ARDUINO_PORT]
+    return ports[0] if ports else None
+
+def read_water():
+    # 수위 센서 아두이노가 보내는 값을 계속 읽음 (LED 아두이노와 별개). 연결이 안 되면 5초마다 다시 시도
+    conn, warned = None, False
     while shared['running']:
-        conn = arduino['conn']
         if conn is None:
-            time.sleep(5)
-            if arduino['conn'] is None: connect_arduino()
-            continue
+            port = find_water_port()
+            try:
+                if not port: raise serial.SerialException('연결된 수위 센서 보드가 없습니다')
+                conn = serial.Serial(port, WATER_BAUD, timeout=1)
+                print(f'[수위] {port} 연결됨'); warned = False
+            except (serial.SerialException, OSError) as e:
+                if not warned: print(f'[수위] 수위 센서에 연결할 수 없습니다 (5초마다 다시 시도): {e}'); warned = True
+                time.sleep(5)
+                continue
         try:
             line = conn.readline().decode(errors='ignore').strip()
-        except (serial.SerialException, OSError, TypeError, AttributeError):
-            with arduino_lock:
-                if arduino['conn'] is conn:
-                    conn.close(); arduino['conn'] = None
+        except (serial.SerialException, OSError):
+            conn.close(); conn = None
             server.water.update(on=False, level='off')
-            print('[아두이노] 연결이 끊겼습니다. 다시 연결을 시도합니다.')
+            print('[수위] 수위 센서 연결이 끊겼습니다. 5초 뒤 다시 연결을 시도합니다.')
+            time.sleep(5)
             continue
         if line.isdigit(): update_water(int(line))  # 숫자가 아닌 줄은 무시
 
@@ -207,7 +221,8 @@ def run_server():
     server.app.add_url_rule('/camera.mjpg', 'camera_stream', camera_stream)
     for name in ('complete', 'exit_vehicle'):  # 주차 완료 / 출차 때 아두이노로 점유 상태 전송
         server.app.view_functions[name] = notify_arduino(server.app.view_functions[name])
-    threading.Thread(target=lambda: (connect_arduino(), read_arduino()), daemon=True).start()  # 연결 후 수위 값 읽기
+    threading.Thread(target=connect_arduino, daemon=True).start()  # 주차 LED 아두이노 연결
+    threading.Thread(target=read_water, daemon=True).start()       # 수위 센서 아두이노 연결 후 값 읽기
     server.app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False, threaded=True)
 
 def ocr_loop():
