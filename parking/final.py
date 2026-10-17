@@ -9,7 +9,7 @@ import os
 # Ctrl+C로 끌 때 'forrtl: error (200)'로 강제 종료되는 것을 막음 (numpy/scipy가 쓰는 Intel 라이브러리 문제)
 os.environ.setdefault('FOR_DISABLE_CONSOLE_CTRL_HANDLER', '1')
 import logging, re, sys, threading, time, webbrowser
-import cv2, easyocr
+import cv2, easyocr, serial
 import numpy as np
 from flask import Response
 from PIL import Image, ImageDraw, ImageFont
@@ -24,6 +24,8 @@ COOLDOWN = 10        # 같은 차량을 다시 관리자 화면에 알리기까�
 OPEN_BROWSER = True  # 실행하면 관리자/내비 화면을 브라우저에 자동으로 열지
 URL = 'http://127.0.0.1:5000'
 WINDOW = 'Parking Camera (q: quit)'
+ARDUINO_PORT = 'COM6'  # 아두이노 우노가 연결된 포트
+ARDUINO_BAUD = 9600    # 아두이노 코드의 Serial.begin() 값과 같아야 함
 PLATE_RE = re.compile(r'\d{2,3}[가-힣]\d{4}')  # 번호판 모양: 12가3456 또는 123가4567
 
 # 카메라 화면에 한글을 쓰기 위한 글꼴 (cv2.putText는 한글이 ???로 나옴)
@@ -32,6 +34,51 @@ except OSError: FONT = None
 
 # 카메라 스레드, 글자 인식 스레드, 웹 서버가 함께 쓰는 값
 shared = {'frame': None, 'jpg': None, 'boxes': [], 'running': True}
+arduino = {'conn': None}
+arduino_lock = threading.Lock()
+
+def open_arduino():
+    arduino['conn'] = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=1)
+    time.sleep(2)  # 포트를 열면 아두이노가 재시작되므로 준비될 때까지 기다림
+    # 재시작된 아두이노의 LED를 현재 주차 상태와 맞추기 위해 모든 공간 상태를 한 번 보냄
+    for sid, s in server.state.items():
+        arduino['conn'].write(f"{sid},{1 if s['status'] == 'occupied' else 0}\n".encode())
+    print(f'[아두이노] {ARDUINO_PORT} 연결됨 (전체 공간 상태 전송)')
+
+def connect_arduino():
+    # 프로그램 시작할 때 미리 연결해 둠 (실패해도 [주차 완료] 때 다시 시도)
+    with arduino_lock:
+        try: open_arduino()
+        except (serial.SerialException, OSError) as e:
+            print(f'[아두이노] {ARDUINO_PORT}에 연결할 수 없습니다. 연결을 확인하세요: {e}')
+
+def send_arduino(space_id, occupied):
+    # 아두이노로 '공간번호,점유상태' 한 줄을 보냄 (점유 1, 빈자리 0). 예: 'C2,1\n'
+    # 아두이노가 없거나 오류가 나도 웹 서버는 멈추지 않도록 뒤에서 실행하고 오류는 출력만 함
+    msg = f'{space_id},{1 if occupied else 0}\n'
+    def run():
+        with arduino_lock:
+            try:
+                if arduino['conn'] is None: open_arduino()
+                arduino['conn'].write(msg.encode())
+                print(f'[아두이노] 보냄: {msg.strip()}')
+            except (serial.SerialException, OSError) as e:
+                print(f'[아두이노] {ARDUINO_PORT} 전송 실패 ({msg.strip()}): {e}')
+                if arduino['conn']: arduino['conn'].close()
+                arduino['conn'] = None  # 다음 전송 때 다시 연결 시도
+    threading.Thread(target=run, daemon=True).start()
+
+def notify_arduino(view):
+    # app.py의 [주차 완료]/[출차] 처리를 감싸서, 처리 뒤 점유 상태가 바뀐 공간만 아두이노에 알림
+    # (배정만 된 자리는 점유가 아니므로 보내지 않음)
+    def wrapper(*args, **kwargs):
+        before = {sid: s['status'] == 'occupied' for sid, s in server.state.items()}
+        result = view(*args, **kwargs)
+        for sid, s in server.state.items():
+            now = s['status'] == 'occupied'
+            if now != before[sid]: send_arduino(sid, now)
+        return result
+    return wrapper
 
 def set_status(text, ocr_text=None):
     # 인식 상태를 바꾸면 카메라 창, 관리자 화면, 터미널에 모두 반영됨
@@ -80,6 +127,9 @@ def run_server():
     # Flask 웹 서버를 별도 스레드에서 실행 (카메라 창은 메인 스레드에서 띄워야 함)
     logging.getLogger('werkzeug').setLevel(logging.ERROR)  # 1초마다 오는 화면 갱신 요청 로그는 숨김
     server.app.add_url_rule('/camera.mjpg', 'camera_stream', camera_stream)
+    for name in ('complete', 'exit_vehicle'):  # 주차 완료 / 출차 때 아두이노로 점유 상태 전송
+        server.app.view_functions[name] = notify_arduino(server.app.view_functions[name])
+    threading.Thread(target=connect_arduino, daemon=True).start()
     server.app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False, threaded=True)
 
 def ocr_loop():

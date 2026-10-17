@@ -4,7 +4,7 @@ import csv, os, random, re, threading, time
 app = Flask(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 WIDTH_LIMIT = 1900  # 비경차 너비 기준 n(mm). 실제 주차장에 맞춰 바꿀 수 있는 설정값
-PREPARKED = ['C1']  # 프로그램 시작할 때부터 주차된 자리로 처리할 공간 (차량 번호 없음)
+PREPARKED = {'C1': '12사3456'}  # 프로그램 시작할 때부터 주차되어 있는 차량 {공간 번호: 차량 번호}
 lock = threading.Lock()  # 여러 차량이 동시에 배정 요청을 해도 같은 칸이 두 번 배정되지 않게 막음
 
 def normalize_plate(value):
@@ -63,8 +63,12 @@ spaces = read_csv('parking.csv', 'space')
 if not spaces:
     spaces = [{'id': str(i), 'type': t} for i, t in enumerate(['S','B','S','B','B','K','S','B','B'], 1)]
 # status: free / assigned / occupied
-state = {s['id']: {'status':'occupied' if s['id'] in PREPARKED else 'free', 'plate':None} for s in spaces}
+state = {s['id']: {'status':'free', 'plate':None} for s in spaces}
 vehicle_assignments = {}
+for sid, plate in PREPARKED.items():  # 처음부터 주차된 차량은 주차 완료 상태로 등록
+    if sid in state:
+        state[sid] = {'status':'occupied', 'plate':normalize_plate(plate)}
+        vehicle_assignments[normalize_plate(plate)] = sid
 current = {'plate': None}  # 지금 두 화면(관리자/내비)이 함께 보고 있는 차량 번호
 # 카메라(final.py)가 마지막으로 인식한 번호판. seq는 새 인식이 들어올 때마다 1씩 커짐
 detected = {'seq': 0, 'plate': None, 'time': None}
@@ -157,12 +161,7 @@ def complete():
 @app.post('/api/exit')
 def exit_vehicle():
     plate = normalize_plate(request.json.get('plate',''))
-    space = str(request.json.get('space') or '')
     with lock:
-        # 차량 번호 없이 주차된 자리(PREPARKED)는 공간 번호로 출차 처리
-        if not plate and space in state and state[space]['status'] == 'occupied' and state[space]['plate'] is None:
-            state[space] = {'status':'free', 'plate':None}
-            return jsonify(ok=True, message='출차 처리되었습니다.')
         sid = vehicle_assignments.pop(plate, None)
         if sid is None: return jsonify(ok=False, message='배정된 공간이 없습니다.'), 404
         state[sid] = {'status':'free', 'plate':None}

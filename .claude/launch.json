@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "parking", "runtimeExecutable": "python", "runtimeArgs": ["parking/app.py"], "port": 5000 }
+  ]
+}

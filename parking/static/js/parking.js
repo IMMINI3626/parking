@@ -50,7 +50,7 @@ function renderAdmin(){
   (c.v?`<div class="item"><span>차량 정보</span><b>${esc(c.v.type)} · ${c.v.width}mm · ${esc(c.v.need||'-')} 유형</b></div>`:'')+
   `<div class="item"><span>배정 공간</span><b>${c.sid?`${esc(c.sid)}번 · ${STATUS[c.space?.status]||''}`:'배정 없음'}</b></div>`;
  const assigned=spaces.filter(s=>s.status!=='free');
- $('assignments').innerHTML=assigned.length?assigned.map(s=>!s.plate?`<div class="item"><span>기존 주차 · ${esc(s.id)}번 · 주차 완료</span><span class="btns"><button onclick="exitSpace('${encodeURIComponent(s.id)}')">출차</button></span></div>`:`<div class="item${s.plate===c.p?' on':''}"><span>${esc(s.plate)} · ${esc(s.id)}번 · ${s.status==='occupied'?'주차 완료':'배정됨'}</span><span class="btns"><button class="sim alt" onclick="pick('${encodeURIComponent(s.plate)}')">안내</button><button onclick="exitCar('${encodeURIComponent(s.plate)}')">출차</button></span></div>`).join(''):'<div class="message">배정된 차량이 없습니다.</div>';
+ $('assignments').innerHTML=assigned.length?assigned.map(s=>`<div class="item${s.plate===c.p?' on':''}"><span>${esc(s.plate)} · ${esc(s.id)}번 · ${s.status==='occupied'?'주차 완료':'배정됨'}</span><span class="btns"><button class="sim alt" onclick="pick('${encodeURIComponent(s.plate)}')">안내</button><button onclick="exitCar('${encodeURIComponent(s.plate)}')">출차</button></span></div>`).join(''):'<div class="message">배정된 차량이 없습니다.</div>';
  $('vehicles').innerHTML=data.vehicles.map(v=>`<div class="item"><span>${esc(v.plate)} · ${esc(v.type)} · ${v.width}mm</span><span>${data.assignments[v.plate]?esc(data.assignments[v.plate])+'번':''}</span></div>`).join('')||'<div class="message">등록 차량이 없습니다.</div>';
 }
 // 카메라(final.py)가 인식한 번호판을 보여 주고, 차량번호 칸에 채워 둠 (배정은 관리자가 [배정]을 눌러야 함)
@@ -72,8 +72,6 @@ function renderCamera(){
 }
 async function clearDetected(){try{await post('/api/detected/clear',{});$('plate').value='';await refresh();}catch(e){$('msg').textContent=e.message;}}
 async function pick(p){try{const d=await selectCar(decodeURIComponent(p));$('msg').textContent=d.message;}catch(e){$('msg').textContent=e.message;}}
-// 차량 번호 없이 주차된 자리(시작할 때부터 주차된 자리)는 공간 번호로 출차
-async function exitSpace(sid){try{await post('/api/exit',{space:decodeURIComponent(sid)});$('msg').textContent='출차 처리되었습니다.';await refresh();}catch(e){$('msg').textContent=e.message;}}
 async function exitCar(p){try{await post('/api/exit',{plate:decodeURIComponent(p)});$('msg').textContent='출차 처리되었습니다.';await refresh();}catch(e){$('msg').textContent=e.message;}}
 
 function renderGuide(){
