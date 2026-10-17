@@ -16,8 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 import app as server  # app.py의 Flask 서버와 주차 상태를 그대로 사용
 
 # 카메라 번호. 'python final.py 2'처럼 실행하면 2번 카메라를 씀 (없으면 아래 기본값)
-# 이 노트북: 0 = 내장 카메라, 1 = 가상 카메라(영상 없음), 2 = 외장 USB 카메라. USB를 다시 꽂으면 번호가 바뀔 수 있음
-CAMERA_INDEX = int(sys.argv[1]) if len(sys.argv) > 1 else 2
+# 이 노트북: 0 = 내장 카메라, 1 = 외장 USB 카메라, 2 = 가상 카메라(영상 없음, 빨간 X 화면). USB를 다시 꽂으면 번호가 바뀔 수 있음
+CAMERA_INDEX = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 MIN_CONF = 0.3       # 신뢰도가 이 값보다 낮은 글자는 버림
 CONFIRM_COUNT = 2    # 같은 번호가 연속 몇 번 읽혀야 확정할지 (한 번만 잘못 읽힌 번호는 무시)
 COOLDOWN = 10        # 같은 차량을 다시 관리자 화면에 알리기까지 기다리는 시간(초)
@@ -82,8 +82,12 @@ def run_server():
     server.app.add_url_rule('/camera.mjpg', 'camera_stream', camera_stream)
     server.app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False, threaded=True)
 
-def ocr_loop(reader):
+def ocr_loop():
     # 글자 인식은 한 번에 몇 초 걸리므로 따로 실행 → 카메라 화면은 멈추지 않음
+    # 모델 준비(30초 정도)도 여기서 하므로 그동안에도 카메라 창은 바로 뜸
+    set_status('글자 인식 모델(EasyOCR) 준비 중... 처음에는 30초 정도 걸릴 수 있습니다')
+    reader = easyocr.Reader(['ko', 'en'], gpu=False)
+    set_status('번호판을 비춰 주세요')
     candidate, streak = None, 0   # 지금 연속으로 읽히고 있는 번호와 그 횟수
     last_sent = {}                # 번호 → 마지막으로 관리자 화면에 알린 시각
     while shared['running']:
@@ -130,10 +134,7 @@ def main():
             return
 
     server.camera['on'] = True
-    set_status('글자 인식 모델(EasyOCR) 준비 중... 처음에는 30초 정도 걸릴 수 있습니다')
-    reader = easyocr.Reader(['ko', 'en'], gpu=False)
-    threading.Thread(target=ocr_loop, args=(reader,), daemon=True).start()
-    set_status('번호판을 비춰 주세요')
+    threading.Thread(target=ocr_loop, daemon=True).start()
     print('카메라 인식 시작 (카메라 창에서 q 또는 터미널에서 Ctrl+C를 누르면 카메라와 웹 서버가 함께 종료됩니다)')
 
     show_window, first = True, True
